@@ -1,6 +1,6 @@
 # DropKV
 
-The accompanying paper, [**DropKV: Decoupling Residual-Output Perturbation for
+[**DropKV: Decoupling Residual-Output Perturbation for
 Near-Optimal KV-Cache
 Eviction**](https://openreview.net/pdf?id=UVbaJoD3Qa), has been accepted to
 **NeurIPS 2026 as a poster**.
