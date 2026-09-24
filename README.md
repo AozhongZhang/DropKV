@@ -1,21 +1,14 @@
 # DropKV
 
-DropKV is an attention-output-sensitive KV-cache eviction method for LLM inference. During prefill, it scores KV positions by their estimated effect on the attention output and retains the highest-scoring fraction. Decode then continues with the compressed cache.
+The accompanying paper, [**DropKV: Decoupling Residual-Output Perturbation for
+Near-Optimal KV-Cache
+Eviction**](https://openreview.net/pdf?id=UVbaJoD3Qa), has been accepted to
+**NeurIPS 2026 as a poster**.
 
-## Paper
-
-**DropKV: Decoupling Residual-Output Perturbation for Near-Optimal KV-Cache Eviction** has been accepted to **NeurIPS 2026 as a poster**.
-
-[OpenReview PDF](https://openreview.net/pdf?id=UVbaJoD3Qa)
-
-```bibtex
-@inproceedings{zhang2026dropkv,
-  title     = {DropKV: Decoupling Residual-Output Perturbation for Near-Optimal KV-Cache Eviction},
-  author    = {Zhang, Aozhong and Gurses, Selcuk and Deng, Yanxia and Wang, Naigang and Liu, Chi-Chun and Wertheimer, Davis and Liu, Derrick and Li, Xin and Yang, Zi and Ye, Felix X.-F. and Yin, Penghang},
-  booktitle = {Advances in Neural Information Processing Systems},
-  year      = {2026}
-}
-```
+DropKV is an attention-output-sensitive KV-cache eviction method for LLM
+inference. During prefill, it scores KV positions by their estimated effect on
+the attention output and retains the highest-scoring fraction. Decode then
+continues with the compressed cache.
 
 ## What is included
 
@@ -127,10 +120,21 @@ git -C transformers_src apply --check ../patches/dropkv_transformers.patch
 The `reset --hard` command above is only for a disposable Transformers clone;
 do not run it in a checkout containing work you need to keep.
 
+## License
 
-## Licensing and attribution
+DropKV is released under the [Apache License 2.0](LICENSE). Portions adapted
+from Hugging Face Transformers remain under Apache-2.0; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
 
-The source repository did not contain a top-level license. Before publication,
-the copyright holders should select a license for the original DropKV code.
-Transformers-derived portions remain subject to Apache-2.0; see
-`THIRD_PARTY_NOTICES.md` and `licenses/Apache-2.0.txt`.
+## Citation
+
+If you find DropKV useful in your research, please cite:
+
+```bibtex
+@inproceedings{zhang2026dropkv,
+  title     = {DropKV: Decoupling Residual-Output Perturbation for Near-Optimal KV-Cache Eviction},
+  author    = {Zhang, Aozhong and Gurses, Selcuk and Deng, Yanxia and Wang, Naigang and Liu, Chi-Chun and Wertheimer, Davis and Liu, Derrick and Li, Xin and Yang, Zi and Ye, Felix X.-F. and Yin, Penghang},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2026}
+}
+```
