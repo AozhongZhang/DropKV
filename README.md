@@ -2,6 +2,20 @@
 
 DropKV is an attention-output-sensitive KV-cache eviction method for LLM inference. During prefill, it scores KV positions by their estimated effect on the attention output and retains the highest-scoring fraction. Decode then continues with the compressed cache.
 
+## Paper
+
+**DropKV: Decoupling Residual-Output Perturbation for Near-Optimal KV-Cache Eviction** has been accepted to **NeurIPS 2026 as a poster**.
+
+[OpenReview PDF](https://openreview.net/pdf?id=UVbaJoD3Qa)
+
+```bibtex
+@inproceedings{zhang2026dropkv,
+  title     = {DropKV: Decoupling Residual-Output Perturbation for Near-Optimal KV-Cache Eviction},
+  author    = {Zhang, Aozhong and Gurses, Selcuk and Deng, Yanxia and Wang, Naigang and Liu, Chi-Chun and Wertheimer, Davis and Liu, Derrick and Li, Xin and Yang, Zi and Ye, Felix X.-F. and Yin, Penghang},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2026}
+}
+```
 
 ## What is included
 
