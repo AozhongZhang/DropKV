@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        run: python -m compileall -q dropkv_cache.py dropkv_triton.py tests
+
+      - name: Check shell scripts
+        run: bash -n setup.sh run_eval.sh
+
+      - name: Check Transformers patch
+        run: |
+          git clone --filter=blob:none https://github.com/huggingface/transformers.git /tmp/dropkv-transformers
+          git -C /tmp/dropkv-transformers checkout fd6bc380c8854a370fbc9f68a157895d84dce7d7
+          git -C /tmp/dropkv-transformers apply --check "$GITHUB_WORKSPACE/patches/dropkv_transformers.patch"

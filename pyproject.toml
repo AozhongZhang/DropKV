@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dropkv"
+version = "0.1.0"
+description = "Attention-output-sensitive KV cache eviction for efficient LLM inference"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.6.0",
+]
+
+[project.optional-dependencies]
+triton = ["triton>=3.0"]
+test = ["pytest>=8"]
+
+[tool.setuptools]
+py-modules = ["dropkv_cache", "dropkv_triton"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that download a model and require patched Transformers",
+]

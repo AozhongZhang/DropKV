@@ -1,0 +1,25 @@
+# Model weights (download separately)
+Meta-Llama-*/
+Qwen*/
+models/
+
+# Patched transformers (built by setup.sh)
+transformers_src/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Environment
+.env
+*.log
+
+# lm-eval outputs
+results/
+output/
+.worktrees/

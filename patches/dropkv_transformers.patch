@@ -1,0 +1,346 @@
+diff --git a/src/transformers/__init__.py b/src/transformers/__init__.py
+index 126545c9f2..054e78644d 100755
+--- a/src/transformers/__init__.py
++++ b/src/transformers/__init__.py
+@@ -367,6 +367,7 @@ else:
+         "HQQQuantizedLayer",
+         "Cache",
+         "DynamicCache",
++        "DropKVCache",
+         "EncoderDecoderCache",
+         "QuantizedCache",
+         "StaticCache",
+@@ -480,6 +481,7 @@ if TYPE_CHECKING:
+     from .cache_utils import Cache as Cache
+     from .cache_utils import DynamicCache as DynamicCache
+     from .cache_utils import DynamicLayer as DynamicLayer
++    from .cache_utils import DropKVCache as DropKVCache
+     from .cache_utils import EncoderDecoderCache as EncoderDecoderCache
+     from .cache_utils import HQQQuantizedLayer as HQQQuantizedLayer
+     from .cache_utils import QuantizedCache as QuantizedCache
+diff --git a/src/transformers/cache_utils.py b/src/transformers/cache_utils.py
+index 530ceda9d5..ce61692ec1 100644
+--- a/src/transformers/cache_utils.py
++++ b/src/transformers/cache_utils.py
+@@ -2,7 +2,9 @@ from abc import ABC, abstractmethod
+ from collections.abc import Iterable
+ from typing import Any
+ 
++import math
+ import torch
++from torch.nn import functional as F
+ 
+ from .configuration_utils import PreTrainedConfig
+ from .utils import (
+@@ -1147,6 +1149,234 @@ class QuantizedCache(Cache):
+         super().__init__(layers=layers)
+ 
+ 
++def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
++    """Expand KV heads to match query heads for GQA: (batch, num_kv_heads, seqlen, head_dim) -> (batch, num_query_heads, seqlen, head_dim)."""
++    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
++    if n_rep == 1:
++        return hidden_states
++    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
++    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
++
++
++class DropKVLayer(DynamicLayer):
++    """
++    A cache layer that performs attention-output-based KV cache eviction during prefill.
++    During prefill, it scores each KV position using an attention-output sensitivity metric
++    and keeps only the top-k fraction. During decode, it behaves like a standard DynamicLayer.
++    """
++
++    def __init__(self, keep_ratio: float = 0.1, window_size: int = 8, kernel_size: int = 11, use_triton: bool = True):
++        super().__init__()
++        if not 0 < keep_ratio <= 1.0:
++            raise ValueError(f"keep_ratio must be in (0, 1], got {keep_ratio}")
++        self.keep_ratio = keep_ratio
++        if window_size <= 0:
++            raise ValueError(f"window_size must be positive, got {window_size}")
++        self.window_size = window_size
++        if kernel_size < 1 or kernel_size % 2 == 0:
++            raise ValueError(f"kernel_size must be a positive odd integer, got {kernel_size}")
++        self.kernel_size = kernel_size
++        self.use_triton = use_triton
++        self._prefilled = False
++        self.cumulative_length = 0
++        self._warned_no_query = False
++
++    def reset(self) -> None:
++        """Reset cache state for a new generation."""
++        super().reset()
++        self._prefilled = False
++        self._warned_no_query = False
++        # Re-initialize to empty tensors (not just zeroed from base class)
++        if self.is_initialized:
++            self.keys = torch.tensor([], dtype=self.dtype, device=self.device)
++            self.values = torch.tensor([], dtype=self.dtype, device=self.device)
++
++    def crop(self, max_length: int) -> None:
++        """Crop stored KV and sync cumulative_length."""
++        super().crop(max_length)
++        # After crop, logical length must match stored length
++        stored = 0 if (not self.is_initialized or self.keys.numel() == 0) else self.keys.shape[-2]
++        self.cumulative_length = stored
++
++    def update(
++        self,
++        key_states: torch.Tensor,
++        value_states: torch.Tensor,
++        cache_kwargs: dict[str, Any] | None = None,
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        # Lazy initialization
++        if not self.is_initialized:
++            self.lazy_initialization(key_states, value_states)
++
++        # Track true number of tokens seen (stored length may differ after eviction)
++        self.cumulative_length += key_states.shape[-2]
++
++        # --- Phase 1: Prefill (first call with query_states available) ---
++        query_states = cache_kwargs.get("query_states") if cache_kwargs is not None else None
++        if query_states is None and not self._prefilled and not self._warned_no_query:
++            self._warned_no_query = True
++            logger.warning_once(
++                "DropKVLayer received no query_states in cache_kwargs. Eviction will not occur. "
++                "Make sure the model's attention layer passes query_states in cache_kwargs."
++            )
++        if not self._prefilled and query_states is not None:
++            self._prefilled = True
++
++            bsz, num_kv_heads, seq_len, head_dim = key_states.shape
++            num_query_heads = query_states.shape[1]
++
++            if seq_len < self.window_size:
++                # Sequence too short for scoring — store full KV, skip eviction
++                self.keys = key_states
++                self.values = value_states
++                return key_states, value_states
++
++            if num_query_heads % num_kv_heads != 0:
++                raise ValueError(f"Query heads {num_query_heads} must be divisible by KV heads {num_kv_heads}")
++            num_key_value_groups = num_query_heads // num_kv_heads
++
++            # Compute DropKV scores — try Triton, fall back to PyTorch
++            _use_triton = self.use_triton
++            if _use_triton:
++                try:
++                    from dropkv_triton import dropkv_scores_triton
++                    scores = dropkv_scores_triton(
++                        query_states.contiguous(),
++                        key_states.contiguous(),
++                        value_states.contiguous(),
++                        window_size=self.window_size,
++                    )
++                except (ImportError, AssertionError):
++                    _use_triton = False
++            if not _use_triton:
++                # Compute attention scores using last window_size queries
++                query_states_last_window = query_states[..., -self.window_size:, :]
++                key_states_repeated = _repeat_kv(key_states, num_key_value_groups)
++                value_states_repeated = _repeat_kv(value_states, num_key_value_groups)
++
++                attn_weights = torch.matmul(query_states_last_window, key_states_repeated.transpose(2, 3)) / math.sqrt(head_dim)
++
++                # Causal mask
++                mask = torch.full((self.window_size, seq_len), float("-inf"), device=attn_weights.device)
++                mask = torch.triu(mask, diagonal=seq_len - self.window_size + 1)
++                attn_weights += mask
++
++                attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
++
++                # Attention output (bf16 matmul)
++                y = torch.matmul(attn_weights, value_states_repeated)
++
++                # Score computation in fp32 for numerical stability and Triton parity.
++                # The bf16 softmax cast above is the critical precision point —
++                # p near 1.0 rounds differently in bf16 vs fp32.
++                eps = 1e-6
++                attn_f = attn_weights.float()
++                W = (attn_f / (1.0 - attn_f + eps)) ** 2
++
++                # Term A = (sum_q W) * ||v||^2
++                W_sum = W.sum(dim=-2)
++                v_norm2 = (value_states_repeated.float() ** 2).sum(dim=-1)
++                termA = W_sum * v_norm2
++
++                # Term B = 2 * <v, W^T y>
++                WT_y = torch.matmul(W.transpose(-1, -2), y.float())
++                termB = 2.0 * torch.sum(value_states_repeated.float() * WT_y, dim=-1)
++
++                # Term C = W^T ||y||^2
++                y_norm2 = (y.float() ** 2).sum(dim=-1)
++                termC = torch.matmul(W.transpose(-1, -2), y_norm2.unsqueeze(-1)).squeeze(-1)
++
++                # Final scores (fp32)
++                scores = termA - termB + termC
++                scores = scores.view(bsz, num_kv_heads, num_key_value_groups, -1)
++                scores = scores.mean(dim=2)
++
++            # Smooth with max_pool1d
++            scores = F.max_pool1d(scores, kernel_size=self.kernel_size, padding=self.kernel_size // 2, stride=1)
++
++            # Protect last window_size tokens
++            big = scores.amax(dim=-1, keepdim=True) + 1.0
++            if self.window_size > 0:
++                scores[:, :, -self.window_size:] = big
++
++            # TopK selection
++            keep_len = max(int(self.keep_ratio * seq_len), self.window_size, 1)
++            keep_idx = torch.topk(scores, k=keep_len, dim=-1, largest=True).indices
++            keep_idx, _ = torch.sort(keep_idx, dim=-1)
++
++            # Gather compressed KV
++            keep_idx_expanded = keep_idx.unsqueeze(-1).expand(-1, -1, -1, head_dim)
++            key_states_compressed = torch.gather(key_states, dim=2, index=keep_idx_expanded)
++            value_states_compressed = torch.gather(value_states, dim=2, index=keep_idx_expanded)
++
++            # Store compressed KV in cache
++            self.keys = key_states_compressed
++            self.values = value_states_compressed
++
++            # Return FULL KV for this layer's attention computation
++            return key_states, value_states
++
++        # --- Phase 2: Decode (subsequent tokens) ---
++        else:
++            # Once we append without eviction, lock out late prefill to prevent
++            # a future query_states arrival from overwriting accumulated KV.
++            self._prefilled = True
++            self.keys = torch.cat([self.keys, key_states], dim=-2)
++            self.values = torch.cat([self.values, value_states], dim=-2)
++            return self.keys, self.values
++
++    def get_seq_length(self) -> int:
++        """Returns the logical sequence length (total tokens seen), not the stored tensor length.
++
++        After eviction the stored KV is shorter than the true sequence length.
++        RoPE position computation relies on this returning the logical length so that
++        decode tokens receive correct positional embeddings.
++        """
++        return self.cumulative_length if self.is_initialized else 0
++
++    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
++        """Return (kv_length, kv_offset) matching the stored KV dimensions.
++
++        The attention mask must match the actual stored tensor size, not the logical
++        length, so we use the stored key tensor length here.
++        """
++        kv_offset = 0
++        query_length = cache_position.shape[0]
++        stored_len = 0 if (not self.is_initialized or self.keys.numel() == 0) else self.keys.shape[-2]
++        kv_length = stored_len + query_length
++        return kv_length, kv_offset
++
++
++class DropKVCache(Cache):
++    """
++    KV cache with attention-output-based eviction (DropKV). During prefill, each layer compresses
++    the KV cache by scoring positions using attention-output sensitivity and keeping only the top fraction.
++    During decode, it appends new tokens like a standard dynamic cache.
++
++    Args:
++        config (`PreTrainedConfig`): Model config (used to determine number of layers).
++        keep_ratio (`float`): Fraction of KV pairs to retain after prefill eviction. Default: 0.1
++        window_size (`int`): Number of recent tokens always kept and used for scoring. Default: 8
++        kernel_size (`int`): Smoothing kernel size for score averaging. Default: 11
++        use_triton (`bool`): Use Triton kernels for scoring (falls back to PyTorch if unavailable). Default: True
++    """
++
++    def __init__(
++        self,
++        config: PreTrainedConfig,
++        keep_ratio: float = 0.1,
++        window_size: int = 8,
++        kernel_size: int = 11,
++        use_triton: bool = True,
++    ):
++        config = config.get_text_config(decoder=True)
++        layers = [
++            DropKVLayer(keep_ratio=keep_ratio, window_size=window_size, kernel_size=kernel_size, use_triton=use_triton)
++            for _ in range(config.num_hidden_layers)
++        ]
++        super().__init__(layers=layers)
++
++
+ class EncoderDecoderCache(Cache):
+     """
+     Base, abstract class for all encoder-decoder caches. Can be used to hold combinations of self-attention and
+diff --git a/src/transformers/generation/utils.py b/src/transformers/generation/utils.py
+index b6c900df19..1c372634c4 100644
+--- a/src/transformers/generation/utils.py
++++ b/src/transformers/generation/utils.py
+@@ -27,6 +27,7 @@ import torch.distributed as dist
+ from torch import nn
+ 
+ from ..cache_utils import (
++    DropKVCache,
+     Cache,
+     DynamicCache,
+     EncoderDecoderCache,
+@@ -1888,7 +1889,22 @@ class GenerationMixin(ContinuousMixin):
+             cache_config = generation_config.cache_config if generation_config.cache_config is not None else {}
+             cache_config.setdefault("config", self.config.get_text_config(decoder=True))
+             backend = cache_config.pop("backend", "quanto")
+-            model_kwargs["past_key_values"] = QuantizedCache(backend=backend, **cache_config)
++
++            if backend == "DropKV":
++                # DropKV eviction cache: extract DropKV-specific params, pass config
++                use_triton_val = cache_config.pop("use_triton", "1")
++                if isinstance(use_triton_val, str):
++                    use_triton_val = use_triton_val.lower() not in ("0", "false", "no")
++                dropkv_kwargs = {
++                    "config": cache_config.pop("config"),
++                    "keep_ratio": float(cache_config.pop("keep_ratio", 0.1)),
++                    "window_size": int(cache_config.pop("window_size", 8)),
++                    "kernel_size": int(cache_config.pop("kernel_size", 11)),
++                    "use_triton": bool(use_triton_val),
++                }
++                model_kwargs["past_key_values"] = DropKVCache(**dropkv_kwargs)
++            else:
++                model_kwargs["past_key_values"] = QuantizedCache(backend=backend, **cache_config)
+         # i.e. `cache_implementation` in [None, "dynamic", "offloaded", "dynamic_full"]
+         # TODO: prepare linear cache from a single API, instead of creating in modeling code
+         else:
+@@ -2349,6 +2365,14 @@ class GenerationMixin(ContinuousMixin):
+             # type() required to access the unbound class-level method
+             decoding_method = getattr(type(self), GENERATION_MODES_MAPPING[generation_mode])
+ 
++        # Pop DropKV-specific kwargs from model_kwargs into cache_config before validation
++        _dropkv_keys = ("backend", "keep_ratio", "window_size", "kernel_size", "use_triton")
++        _dropkv_popped = {k: model_kwargs.pop(k) for k in _dropkv_keys if k in model_kwargs}
++        if _dropkv_popped:
++            if generation_config.cache_config is None:
++                generation_config.cache_config = {}
++            generation_config.cache_config.update(_dropkv_popped)
++
+         self._validate_model_kwargs(model_kwargs.copy())
+         self._validate_generation_mode(generation_mode, generation_config, generation_mode_kwargs)
+ 
+diff --git a/src/transformers/models/llama/modeling_llama.py b/src/transformers/models/llama/modeling_llama.py
+index b1bd01cc32..6c3036c288 100644
+--- a/src/transformers/models/llama/modeling_llama.py
++++ b/src/transformers/models/llama/modeling_llama.py
+@@ -269,7 +269,7 @@ class LlamaAttention(nn.Module):
+ 
+         if past_key_values is not None:
+             # sin and cos are specific to RoPE models; cache_position needed for the static cache
+-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
++            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position, "query_states": query_states}
+             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+ 
+         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+diff --git a/src/transformers/models/qwen2/modeling_qwen2.py b/src/transformers/models/qwen2/modeling_qwen2.py
+index 8c55adfa5d..74e60bd9a8 100644
+--- a/src/transformers/models/qwen2/modeling_qwen2.py
++++ b/src/transformers/models/qwen2/modeling_qwen2.py
+@@ -224,7 +224,7 @@ class Qwen2Attention(nn.Module):
+ 
+         if past_key_values is not None:
+             # sin and cos are specific to RoPE models; cache_position needed for the static cache
+-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
++            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position, "query_states": query_states}
+             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+ 
+         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
