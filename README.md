@@ -1,14 +1,18 @@
-# DropKV
+# DropKV (NeurIPS 2026)
 
 [**DropKV: Decoupling Residual-Output Perturbation for
 Near-Optimal KV-Cache
-Eviction**](https://openreview.net/pdf?id=UVbaJoD3Qa), has been accepted to
+Eviction**](https://arxiv.org/pdf/2610.22130) has been accepted to
 **NeurIPS 2026 as a poster**.
 
 DropKV is an attention-output-sensitive KV-cache eviction method for LLM
 inference. During prefill, it scores KV positions by their estimated effect on
 the attention output and retains the highest-scoring fraction. Decode then
 continues with the compressed cache.
+
+**Integration:** DropKV has been integrated into
+[NVIDIA KVpress](https://github.com/NVIDIA/kvpress) and is available as
+[`DropKVPress`](https://github.com/NVIDIA/kvpress/blob/main/kvpress/presses/dropkv_press.py).
 
 ## What is included
 
