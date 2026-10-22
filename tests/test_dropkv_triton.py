@@ -423,12 +423,12 @@ class TestPyTorchPrecisionMatch:
         tri = dropkv_scores_triton(Q, K, V, match_pytorch_precision=True)
         existing = _existing_pytorch_scores(Q, K, V)
 
-        # After avg_pool1d + window protection, topk should match
+        # After max_pool1d + window protection, topk should match
         W = 8
         kernel_size = 11
-        tri_smooth = F.avg_pool1d(tri, kernel_size=kernel_size,
+        tri_smooth = F.max_pool1d(tri, kernel_size=kernel_size,
                                    padding=kernel_size // 2, stride=1)
-        exist_smooth = F.avg_pool1d(existing, kernel_size=kernel_size,
+        exist_smooth = F.max_pool1d(existing, kernel_size=kernel_size,
                                      padding=kernel_size // 2, stride=1)
         big_t = tri_smooth.amax(dim=-1, keepdim=True) + 1.0
         big_e = exist_smooth.amax(dim=-1, keepdim=True) + 1.0

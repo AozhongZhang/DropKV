@@ -244,7 +244,7 @@ index 530ceda9d5..ce61692ec1 100644
 +        config (`PreTrainedConfig`): Model config (used to determine number of layers).
 +        keep_ratio (`float`): Fraction of KV pairs to retain after prefill eviction. Default: 0.1
 +        window_size (`int`): Number of recent tokens always kept and used for scoring. Default: 8
-+        kernel_size (`int`): Smoothing kernel size for score averaging. Default: 11
++        kernel_size (`int`): Smoothing kernel size for local score max pooling. Default: 11
 +        use_triton (`bool`): Use Triton kernels for scoring (falls back to PyTorch if unavailable). Default: True
 +    """
 +

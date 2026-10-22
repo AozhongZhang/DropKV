@@ -459,8 +459,9 @@ class DropKVCache(DynamicCache):
             # Average over g query groups
             scores = (termA - termB + termC) / g  # [B, Hkv, L]
 
-        # Smooth and protect window tokens
-        scores = F.avg_pool1d(scores, kernel_size=self.kernel_size, padding=self.kernel_size // 2, stride=1)
+        # Smooth with local max pooling, matching the paper implementation,
+        # then protect the observation-window tokens.
+        scores = F.max_pool1d(scores, kernel_size=self.kernel_size, padding=self.kernel_size // 2, stride=1)
         big = scores.amax(dim=-1, keepdim=True) + 1.0
         if self.window_size > 0:
             scores[:, :, -self.window_size:] = big
